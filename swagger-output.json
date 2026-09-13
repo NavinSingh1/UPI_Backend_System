@@ -1,0 +1,3794 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "PhonePe Clone API",
+    "version": "2.0.0",
+    "description": "A PhonePe-style payments backend with a double-entry ledger and integer-paise money handling.\n\n### Money\nRequests take rupees (`amount`, max 2 decimal places — more precision is rejected with 400).\nResponses return both `amount` (rupees) and `amountPaise` (exact integer). Nothing is ever stored as a float.\n\n### Authentication\nCall `POST /api/auth/login`, then send `Authorization: Bearer <token>`. Tokens last 30 days and can be\nrevoked with `POST /api/auth/logout`.\n\n### MPIN\nEvery outbound payment needs the 4-6 digit MPIN. Set it with `POST /api/auth/setup-mpin`.\nFive wrong attempts lock the account for 15 minutes — the counter is per-account, not per-IP.\n\n### Idempotency\nMoney endpoints accept an `Idempotency-Key` header. Repeating a request with the same key replays the\noriginal response instead of moving money twice.\n\n### Seeded test accounts\nAfter `npm run seed`: `amit@example.com` / `priya@example.com` / `rahul@example.com` / `neha@example.com`,\nall with password `password123` and MPIN `1234`.",
+    "license": {
+      "name": "ISC"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "Through nginx (docker compose)"
+    },
+    {
+      "url": "http://localhost:5000",
+      "description": "Direct to the app (npm run dev)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Registration, login, profile, password and account lifecycle"
+    },
+    {
+      "name": "Transactions",
+      "description": "Transfers, history, analytics, statements and refunds"
+    },
+    {
+      "name": "Wallet",
+      "description": "Balance, top-up, withdrawal, bills and reconciliation"
+    },
+    {
+      "name": "Users",
+      "description": "Lookup and QR codes"
+    },
+    {
+      "name": "Payment Requests",
+      "description": "Request money from another user"
+    },
+    {
+      "name": "Split Bills",
+      "description": "Split a bill with exact-paise shares"
+    },
+    {
+      "name": "Recurring",
+      "description": "Autopay mandates executed by the worker"
+    },
+    {
+      "name": "Operations",
+      "description": "Circuit breakers and queue introspection"
+    },
+    {
+      "name": "System",
+      "description": "Health and liveness"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Paste the `token` returned by login/register."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Correlation id, present on 5xx"
+          }
+        }
+      },
+      "ValidationError": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "example": "Validation failed"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MpinError": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "attemptsLeft": {
+            "type": "integer",
+            "description": "Attempts remaining before the account locks"
+          },
+          "retryAfterSeconds": {
+            "type": "integer",
+            "description": "Present when locked out"
+          }
+        }
+      },
+      "MessageResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "_id": {
+            "type": "string",
+            "example": "66df1f77bcf86cd799439011"
+          },
+          "name": {
+            "type": "string",
+            "example": "Amit Sharma"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "example": "amit@example.com"
+          },
+          "phone": {
+            "type": "string",
+            "example": "9876543210"
+          },
+          "upiId": {
+            "type": "string",
+            "example": "amit123@phonepe"
+          },
+          "balance": {
+            "type": "number",
+            "example": 5000,
+            "description": "Rupees"
+          },
+          "balancePaise": {
+            "type": "integer",
+            "example": 500000,
+            "description": "Exact integer paise"
+          },
+          "isActive": {
+            "type": "boolean",
+            "example": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AuthResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/User"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hasMpinSet": {
+                "type": "boolean",
+                "example": false
+              },
+              "token": {
+                "type": "string",
+                "description": "JWT, valid 30 days. Send as `Authorization: Bearer <token>`."
+              }
+            }
+          }
+        ]
+      },
+      "Transaction": {
+        "type": "object",
+        "properties": {
+          "_id": {
+            "type": "string"
+          },
+          "sender": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/User"
+              }
+            ]
+          },
+          "receiver": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/User"
+              }
+            ]
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "TRANSFER",
+              "ADD_MONEY",
+              "WITHDRAW",
+              "BILL_PAY",
+              "REFUND"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "TRANSFER",
+              "FOOD",
+              "TRAVEL",
+              "BILLS",
+              "SHOPPING",
+              "ENTERTAINMENT",
+              "RECHARGE",
+              "OTHER"
+            ]
+          },
+          "billerName": {
+            "type": "string",
+            "example": "Jio Mobile Recharge"
+          },
+          "amount": {
+            "type": "number",
+            "example": 250.5,
+            "description": "Rupees"
+          },
+          "amountPaise": {
+            "type": "integer",
+            "example": 25050
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "SUCCESS",
+              "FAILED",
+              "PENDING",
+              "REVERSED"
+            ]
+          },
+          "refundOf": {
+            "type": "string",
+            "nullable": true
+          },
+          "refunded": {
+            "type": "number",
+            "example": 0
+          },
+          "refundedPaise": {
+            "type": "integer",
+            "example": 0
+          },
+          "reference": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "PAYMENT_REQUEST",
+                  "SPLIT_BILL",
+                  "RECURRING"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "periodKey": {
+                "type": "string",
+                "example": "2026-09-10"
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "LedgerEntry": {
+        "type": "object",
+        "description": "One side of a double-entry pair. Debits and credits for a transaction always sum to zero.",
+        "properties": {
+          "_id": {
+            "type": "string"
+          },
+          "transaction": {
+            "type": "string"
+          },
+          "account": {
+            "type": "string",
+            "nullable": true,
+            "description": "null for external (non-user) accounts"
+          },
+          "externalAccount": {
+            "type": "string",
+            "enum": [
+              "BANK",
+              "BILLER",
+              "SYSTEM"
+            ]
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "DEBIT",
+              "CREDIT"
+            ]
+          },
+          "amount": {
+            "type": "number"
+          },
+          "amountPaise": {
+            "type": "integer"
+          },
+          "balanceAfter": {
+            "type": "number"
+          },
+          "balanceAfterPaise": {
+            "type": "integer"
+          }
+        }
+      },
+      "Pagination": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer",
+            "example": 1
+          },
+          "limit": {
+            "type": "integer",
+            "example": 10
+          },
+          "total": {
+            "type": "integer",
+            "example": 42
+          },
+          "totalPages": {
+            "type": "integer",
+            "example": 5
+          }
+        }
+      },
+      "TransactionList": {
+        "type": "object",
+        "properties": {
+          "transactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Transaction"
+            }
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/Pagination"
+          }
+        }
+      },
+      "TransferResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "example": "Money Transfer Successful"
+          },
+          "transaction": {
+            "$ref": "#/components/schemas/Transaction"
+          },
+          "newBalance": {
+            "type": "number",
+            "example": 799.5
+          },
+          "idempotent": {
+            "type": "boolean",
+            "description": "true when this is a replayed response, not a new transfer"
+          }
+        }
+      },
+      "Balance": {
+        "type": "object",
+        "properties": {
+          "balance": {
+            "type": "number",
+            "example": 1000
+          },
+          "balancePaise": {
+            "type": "integer",
+            "example": 100000
+          }
+        }
+      },
+      "Limits": {
+        "type": "object",
+        "properties": {
+          "perTransaction": {
+            "type": "number",
+            "example": 100000
+          },
+          "daily": {
+            "type": "object",
+            "properties": {
+              "limit": {
+                "type": "number"
+              },
+              "spent": {
+                "type": "number"
+              },
+              "remaining": {
+                "type": "number"
+              },
+              "transactionsUsed": {
+                "type": "integer"
+              },
+              "transactionsAllowed": {
+                "type": "integer"
+              }
+            }
+          },
+          "monthly": {
+            "type": "object",
+            "properties": {
+              "limit": {
+                "type": "number"
+              },
+              "spent": {
+                "type": "number"
+              },
+              "remaining": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "Summary": {
+        "type": "object",
+        "properties": {
+          "month": {
+            "type": "string",
+            "example": "September 2026"
+          },
+          "transactionCount": {
+            "type": "integer"
+          },
+          "totalSent": {
+            "type": "number"
+          },
+          "totalReceived": {
+            "type": "number"
+          },
+          "totalBillsPaid": {
+            "type": "number"
+          },
+          "totalAddedMoney": {
+            "type": "number"
+          },
+          "totalWithdrawn": {
+            "type": "number"
+          },
+          "limits": {
+            "type": "object"
+          }
+        }
+      },
+      "Analytics": {
+        "type": "object",
+        "properties": {
+          "windowMonths": {
+            "type": "integer",
+            "example": 3
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "totalSpent": {
+            "type": "number"
+          },
+          "byCategory": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string"
+                },
+                "total": {
+                  "type": "number"
+                },
+                "count": {
+                  "type": "integer"
+                },
+                "percentage": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "trend": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "month": {
+                  "type": "string",
+                  "example": "2026-09"
+                },
+                "total": {
+                  "type": "number"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Reconciliation": {
+        "type": "object",
+        "description": "Compares the materialized balance against the sum of the ledger. Non-zero drift indicates a bug.",
+        "properties": {
+          "userId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "upiId": {
+            "type": "string"
+          },
+          "cached": {
+            "type": "number"
+          },
+          "derived": {
+            "type": "number"
+          },
+          "drift": {
+            "type": "number",
+            "example": 0
+          },
+          "balanced": {
+            "type": "boolean",
+            "example": true
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "PaymentRequest": {
+        "type": "object",
+        "properties": {
+          "_id": {
+            "type": "string"
+          },
+          "requester": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/User"
+              }
+            ]
+          },
+          "payer": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/User"
+              }
+            ]
+          },
+          "amount": {
+            "type": "number",
+            "example": 150
+          },
+          "amountPaise": {
+            "type": "integer",
+            "example": 15000
+          },
+          "note": {
+            "type": "string",
+            "example": "Lunch"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "ACCEPTED",
+              "DECLINED",
+              "CANCELLED",
+              "EXPIRED"
+            ]
+          },
+          "transaction": {
+            "type": "string",
+            "nullable": true
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "respondedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SplitBill": {
+        "type": "object",
+        "properties": {
+          "_id": {
+            "type": "string"
+          },
+          "creator": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/User"
+              }
+            ]
+          },
+          "description": {
+            "type": "string",
+            "example": "Dinner at Truffles"
+          },
+          "total": {
+            "type": "number",
+            "example": 100
+          },
+          "totalPaise": {
+            "type": "integer",
+            "example": 10000
+          },
+          "outstanding": {
+            "type": "number",
+            "example": 66.66
+          },
+          "outstandingPaise": {
+            "type": "integer",
+            "example": 6666
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "OPEN",
+              "SETTLED"
+            ]
+          },
+          "participants": {
+            "type": "array",
+            "description": "Shares are computed in exact paise and always sum to the total.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "user": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/User"
+                    }
+                  ]
+                },
+                "share": {
+                  "type": "number",
+                  "example": 33.34
+                },
+                "sharePaise": {
+                  "type": "integer",
+                  "example": 3334
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "PENDING",
+                    "PAID"
+                  ]
+                },
+                "transaction": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "paidAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Mandate": {
+        "type": "object",
+        "description": "An autopay mandate. The MPIN is verified once at creation and never stored — that verification is the authorization for future automatic runs.",
+        "properties": {
+          "_id": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          },
+          "payee": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/User"
+              }
+            ]
+          },
+          "amount": {
+            "type": "number",
+            "example": 499
+          },
+          "amountPaise": {
+            "type": "integer",
+            "example": 49900
+          },
+          "note": {
+            "type": "string"
+          },
+          "frequency": {
+            "type": "string",
+            "enum": [
+              "DAILY",
+              "WEEKLY",
+              "MONTHLY"
+            ]
+          },
+          "nextRunAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastRunAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastError": {
+            "type": "string",
+            "nullable": true
+          },
+          "runCount": {
+            "type": "integer"
+          },
+          "failureCount": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "PAUSED",
+              "CANCELLED",
+              "FAILED"
+            ]
+          },
+          "authorizedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "QrCode": {
+        "type": "object",
+        "properties": {
+          "upiId": {
+            "type": "string",
+            "example": "amit123@phonepe"
+          },
+          "name": {
+            "type": "string",
+            "example": "Amit Sharma"
+          },
+          "amount": {
+            "type": "number",
+            "nullable": true
+          },
+          "amountPaise": {
+            "type": "integer",
+            "nullable": true
+          },
+          "uri": {
+            "type": "string",
+            "example": "upi://pay?pa=amit123%40phonepe&pn=Amit+Sharma&cu=INR"
+          },
+          "qrDataUrl": {
+            "type": "string",
+            "example": "data:image/png;base64,iVBORw0KG..."
+          }
+        }
+      },
+      "ParsedQr": {
+        "type": "object",
+        "properties": {
+          "payee": {
+            "$ref": "#/components/schemas/User"
+          },
+          "amount": {
+            "type": "number",
+            "nullable": true
+          },
+          "amountPaise": {
+            "type": "integer",
+            "nullable": true
+          },
+          "note": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CircuitState": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "example": "smtp"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "CLOSED",
+              "OPEN",
+              "HALF_OPEN"
+            ]
+          },
+          "consecutiveFailures": {
+            "type": "integer"
+          },
+          "failureThreshold": {
+            "type": "integer"
+          },
+          "retryAfterMs": {
+            "type": "integer"
+          },
+          "stats": {
+            "type": "object",
+            "properties": {
+              "calls": {
+                "type": "integer"
+              },
+              "successes": {
+                "type": "integer"
+              },
+              "failures": {
+                "type": "integer"
+              },
+              "rejected": {
+                "type": "integer"
+              },
+              "timeouts": {
+                "type": "integer"
+              },
+              "opens": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "QueueStats": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "redis",
+              "in-process"
+            ]
+          },
+          "queue": {
+            "type": "string",
+            "example": "notifications"
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "waiting": {
+                "type": "integer"
+              },
+              "active": {
+                "type": "integer"
+              },
+              "completed": {
+                "type": "integer"
+              },
+              "failed": {
+                "type": "integer"
+              },
+              "delayed": {
+                "type": "integer"
+              }
+            }
+          },
+          "deadLettered": {
+            "type": "integer"
+          }
+        }
+      },
+      "DeadLetters": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "jobs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string",
+                  "example": "otp:send"
+                },
+                "originalJobId": {
+                  "type": "string"
+                },
+                "failedReason": {
+                  "type": "string"
+                },
+                "attemptsMade": {
+                  "type": "integer"
+                },
+                "failedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "ok"
+          },
+          "instance": {
+            "type": "string",
+            "example": "api-1",
+            "description": "Which replica served this request"
+          },
+          "uptimeSeconds": {
+            "type": "integer"
+          },
+          "mongo": {
+            "type": "string",
+            "enum": [
+              "disconnected",
+              "connected",
+              "connecting",
+              "disconnecting"
+            ]
+          },
+          "queue": {
+            "$ref": "#/components/schemas/QueueStats"
+          },
+          "circuits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CircuitState"
+            }
+          },
+          "degraded": {
+            "type": "boolean",
+            "description": "true when a dependency circuit is open but the API is still serving"
+          }
+        }
+      }
+    },
+    "responses": {
+      "ValidationFailed": {
+        "description": "Request body failed validation",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "example": {
+              "message": "Validation failed",
+              "errors": [
+                "\"amount\" must be greater than zero",
+                "MPIN must be 4-6 digits"
+              ]
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing, invalid, revoked or expired token",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "message": "Not authorized, no token"
+            }
+          }
+        }
+      },
+      "IncorrectMpin": {
+        "description": "Incorrect MPIN (attemptsLeft counts down to lockout)",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/MpinError"
+            },
+            "example": {
+              "message": "Incorrect MPIN",
+              "attemptsLeft": 4
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Authenticated but not permitted to act on this resource",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "message": "You are not authorized to view this transaction"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "message": "Transaction not found"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Resource is not in a state that allows this action",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "message": "This request is already accepted"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Rate limited, or MPIN lockout active",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "message": "Too many incorrect MPIN attempts. Try again in 15 minute(s)."
+            }
+          }
+        }
+      },
+      "ServerError": {
+        "description": "Unexpected error (consistent shape, never a stack trace)",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "message": "Something went wrong on our end",
+              "requestId": "9f1c2b3a-..."
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Service banner",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Plain-text banner",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api-docs.json": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "This OpenAPI document as raw JSON",
+        "description": "For client codegen or importing into other tools. The interactive UI is at /api-docs.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI spec",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Liveness/readiness probe",
+        "description": "Used by nginx for passive health checks and Docker for HEALTHCHECK. Also reports queue and circuit-breaker state, so one call tells you whether dependencies are healthy.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/register": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Register a new user",
+        "description": "Creates the account, assigns a random UPI ID, and credits the opening balance as a real ledger-backed ADD_MONEY transaction (so a new user has one entry in their history, not zero).",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "email",
+                  "phone",
+                  "password"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 50,
+                    "example": "Test User"
+                  },
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "example": "test@example.com"
+                  },
+                  "phone": {
+                    "type": "string",
+                    "pattern": "^\\d{10}$",
+                    "example": "9876543299"
+                  },
+                  "password": {
+                    "type": "string",
+                    "minLength": 8,
+                    "example": "password123"
+                  }
+                }
+              },
+              "example": {
+                "name": "Test User",
+                "email": "test@example.com",
+                "phone": "9876543299",
+                "password": "password123"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Account created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Log in and receive a JWT",
+        "description": "Rate limited to 5 attempts per 15 minutes per IP to blunt password brute-forcing.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "email",
+                  "password"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "example": "amit@example.com"
+                  },
+                  "password": {
+                    "type": "string",
+                    "example": "password123"
+                  }
+                }
+              },
+              "example": {
+                "email": "amit@example.com",
+                "password": "password123"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Logged in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/auth/profile": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Get the logged-in user (cached 10 min)",
+        "responses": {
+          "200": {
+            "description": "Current user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/auth/setup-mpin": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Set or change the transaction MPIN",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "mpin"
+                ],
+                "properties": {
+                  "mpin": {
+                    "type": "string",
+                    "pattern": "^\\d{4,6}$",
+                    "example": "1234",
+                    "description": "4-6 digit MPIN"
+                  }
+                }
+              },
+              "example": {
+                "mpin": "1234"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "MPIN saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Revoke the current token",
+        "description": "Adds the token to a blacklist until its natural expiry, which is how a stateless JWT gets a working logout.",
+        "responses": {
+          "200": {
+            "description": "Logged out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/auth/change-password": {
+      "put": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Change password (requires the current one)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "oldPassword",
+                  "newPassword"
+                ],
+                "properties": {
+                  "oldPassword": {
+                    "type": "string",
+                    "example": "password123"
+                  },
+                  "newPassword": {
+                    "type": "string",
+                    "minLength": 8,
+                    "example": "newpassword456"
+                  }
+                }
+              },
+              "example": {
+                "oldPassword": "password123",
+                "newPassword": "newpassword456"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Password changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/auth/update-profile": {
+      "put": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Update name and/or phone",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "minProperties": 1,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 50,
+                    "example": "Amit S Sharma"
+                  },
+                  "phone": {
+                    "type": "string",
+                    "pattern": "^\\d{10}$",
+                    "example": "9876543210"
+                  }
+                }
+              },
+              "example": {
+                "name": "Amit S Sharma"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/auth/forgot-password": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Request a password-reset OTP by email",
+        "description": "Responds identically whether or not the email is registered, so this endpoint cannot be used to enumerate accounts. The OTP is queued (retried with backoff) rather than sent inline.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "email"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  }
+                }
+              },
+              "example": {
+                "email": "amit@example.com"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          }
+        }
+      }
+    },
+    "/api/auth/reset-password": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Reset the password using an emailed OTP",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "email",
+                  "otp",
+                  "newPassword"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "example": "amit@example.com"
+                  },
+                  "otp": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 6,
+                    "example": "123456"
+                  },
+                  "newPassword": {
+                    "type": "string",
+                    "minLength": 8,
+                    "example": "newpassword456"
+                  }
+                }
+              },
+              "example": {
+                "email": "amit@example.com",
+                "otp": "123456",
+                "newPassword": "newpassword456"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Password reset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/auth/account": {
+      "delete": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Deactivate (soft-delete) the account",
+        "description": "History is retained; the account can no longer authenticate or log in. Also revokes the current token.",
+        "responses": {
+          "200": {
+            "description": "Deactivated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/transactions/send": {
+      "post": {
+        "tags": [
+          "Transactions"
+        ],
+        "summary": "Send money by phone number or UPI ID",
+        "description": "The debit is a single conditional atomic update, so concurrent transfers cannot overdraw the account. Supports Idempotency-Key for safe retries.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional. Repeating a request with the same key replays the original response instead of moving money twice — send one per logical payment attempt."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "receiverIdentifier",
+                  "amount",
+                  "mpin"
+                ],
+                "properties": {
+                  "receiverIdentifier": {
+                    "type": "string",
+                    "example": "priya456@phonepe",
+                    "description": "10-digit phone number OR UPI ID"
+                  },
+                  "amount": {
+                    "oneOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "example": 250.5,
+                    "description": "Amount in rupees, max 2 decimal places. Rejected with 400 if more precise."
+                  },
+                  "mpin": {
+                    "type": "string",
+                    "pattern": "^\\d{4,6}$",
+                    "example": "1234",
+                    "description": "4-6 digit MPIN"
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 140,
+                    "example": "Lunch"
+                  }
+                }
+              },
+              "example": {
+                "receiverIdentifier": "priya456@phonepe",
+                "amount": 250.5,
+                "mpin": "1234"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Transfer complete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/IncorrectMpin"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/transactions/history": {
+      "get": {
+        "tags": [
+          "Transactions"
+        ],
+        "summary": "Paginated, filterable transaction history",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "description": "Page number (1-based)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 10
+            },
+            "description": "Page size. Hard-capped at MAX_PAGE_SIZE (100) server-side."
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "TRANSFER",
+                "ADD_MONEY",
+                "WITHDRAW",
+                "BILL_PAY",
+                "REFUND"
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "SUCCESS",
+                "FAILED",
+                "PENDING",
+                "REVERSED"
+              ]
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "TRANSFER",
+                "FOOD",
+                "TRAVEL",
+                "BILLS",
+                "SHOPPING",
+                "ENTERTAINMENT",
+                "RECHARGE",
+                "OTHER"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "example": "2026-09-01"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "example": "2026-09-30"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "History page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/transactions/summary": {
+      "get": {
+        "tags": [
+          "Transactions"
+        ],
+        "summary": "Totals for the current calendar month",
+        "responses": {
+          "200": {
+            "description": "Monthly summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Summary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/transactions/analytics": {
+      "get": {
+        "tags": [
+          "Transactions"
+        ],
+        "summary": "Spending by category, with a month-over-month trend",
+        "parameters": [
+          {
+            "name": "months",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 12,
+              "default": 3
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Spending analytics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Analytics"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/transactions/statement": {
+      "get": {
+        "tags": [
+          "Transactions"
+        ],
+        "summary": "Download a statement (CSV or PDF)",
+        "description": "Returns a file download. PDFs are streamed, not buffered.",
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "csv",
+                "pdf"
+              ],
+              "default": "csv"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Statement file",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/transactions/{txnId}": {
+      "get": {
+        "tags": [
+          "Transactions"
+        ],
+        "summary": "Get one transaction, including its ledger entries",
+        "description": "Only the sender or receiver may view a transaction. The two balanced ledger entries are included.",
+        "parameters": [
+          {
+            "name": "txnId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction with ledger",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Transaction"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "ledger": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/LedgerEntry"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/transactions/{txnId}/category": {
+      "patch": {
+        "tags": [
+          "Transactions"
+        ],
+        "summary": "Override the auto-detected spending category",
+        "parameters": [
+          {
+            "name": "txnId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "category"
+                ],
+                "properties": {
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "TRANSFER",
+                      "FOOD",
+                      "TRAVEL",
+                      "BILLS",
+                      "SHOPPING",
+                      "ENTERTAINMENT",
+                      "RECHARGE",
+                      "OTHER"
+                    ]
+                  }
+                }
+              },
+              "example": {
+                "category": "FOOD"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Category updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "transaction": {
+                      "$ref": "#/components/schemas/Transaction"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/transactions/{txnId}/refund": {
+      "post": {
+        "tags": [
+          "Transactions"
+        ],
+        "summary": "Refund a received transfer, fully or partially",
+        "description": "Only the receiver of a TRANSFER can refund it. Omit `amount` to refund the full remaining balance. Over-refunding is prevented by an atomic conditional claim.",
+        "parameters": [
+          {
+            "name": "txnId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional. Repeating a request with the same key replays the original response instead of moving money twice — send one per logical payment attempt."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "mpin"
+                ],
+                "properties": {
+                  "amount": {
+                    "oneOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "example": 250.5,
+                    "description": "Optional. Omit to refund everything still refundable."
+                  },
+                  "mpin": {
+                    "type": "string",
+                    "pattern": "^\\d{4,6}$",
+                    "example": "1234",
+                    "description": "4-6 digit MPIN"
+                  }
+                }
+              },
+              "example": {
+                "amount": 100,
+                "mpin": "1234"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Refund processed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/IncorrectMpin"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/wallet/balance": {
+      "get": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Current wallet balance (cached 2 min)",
+        "responses": {
+          "200": {
+            "description": "Balance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Balance"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wallet/limits": {
+      "get": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Remaining daily/monthly spending headroom",
+        "responses": {
+          "200": {
+            "description": "Limits and usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Limits"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wallet/mini-statement": {
+      "get": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Last 5 transactions",
+        "responses": {
+          "200": {
+            "description": "Recent transactions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Transaction"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wallet/reconcile": {
+      "get": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Verify the cached balance against the ledger",
+        "description": "Recomputes the balance by summing double-entry rows. Any non-zero drift indicates a bug.",
+        "responses": {
+          "200": {
+            "description": "Reconciliation report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reconciliation"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wallet/add-money": {
+      "post": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Top up the wallet from the linked bank",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional. Repeating a request with the same key replays the original response instead of moving money twice — send one per logical payment attempt."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "amount"
+                ],
+                "properties": {
+                  "amount": {
+                    "oneOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "example": 250.5,
+                    "description": "Amount in rupees, max 2 decimal places. Rejected with 400 if more precise."
+                  }
+                }
+              },
+              "example": {
+                "amount": 500
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Wallet topped up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "balance": {
+                      "type": "number"
+                    },
+                    "transaction": {
+                      "$ref": "#/components/schemas/Transaction"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wallet/pay-bill": {
+      "post": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Pay a utility bill",
+        "description": "The category is inferred from the biller name (e.g. \"Jio\" → RECHARGE) and can be overridden later.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional. Repeating a request with the same key replays the original response instead of moving money twice — send one per logical payment attempt."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "billerName",
+                  "amount",
+                  "mpin"
+                ],
+                "properties": {
+                  "billerName": {
+                    "type": "string",
+                    "minLength": 2,
+                    "example": "Jio Mobile Recharge"
+                  },
+                  "amount": {
+                    "oneOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "example": 250.5,
+                    "description": "Amount in rupees, max 2 decimal places. Rejected with 400 if more precise."
+                  },
+                  "mpin": {
+                    "type": "string",
+                    "pattern": "^\\d{4,6}$",
+                    "example": "1234",
+                    "description": "4-6 digit MPIN"
+                  }
+                }
+              },
+              "example": {
+                "billerName": "Jio Mobile Recharge",
+                "amount": 799,
+                "mpin": "1234"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bill paid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "balance": {
+                      "type": "number"
+                    },
+                    "transaction": {
+                      "$ref": "#/components/schemas/Transaction"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/wallet/withdraw": {
+      "post": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Withdraw from the wallet to the linked bank",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional. Repeating a request with the same key replays the original response instead of moving money twice — send one per logical payment attempt."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "amount",
+                  "mpin"
+                ],
+                "properties": {
+                  "amount": {
+                    "oneOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "example": 250.5,
+                    "description": "Amount in rupees, max 2 decimal places. Rejected with 400 if more precise."
+                  },
+                  "mpin": {
+                    "type": "string",
+                    "pattern": "^\\d{4,6}$",
+                    "example": "1234",
+                    "description": "4-6 digit MPIN"
+                  }
+                }
+              },
+              "example": {
+                "amount": 100,
+                "mpin": "1234"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Withdrawn",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "balance": {
+                      "type": "number"
+                    },
+                    "transaction": {
+                      "$ref": "#/components/schemas/Transaction"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/users/search": {
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Find a user by UPI ID before paying them",
+        "parameters": [
+          {
+            "name": "upiId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "priya456@phonepe"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/users/me/qr": {
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "My payment QR code",
+        "description": "Produces a real `upi://pay` deep link, optionally amount-prefilled, as a data URL, PNG or SVG.",
+        "parameters": [
+          {
+            "name": "amount",
+            "in": "query",
+            "schema": {
+              "type": "number"
+            },
+            "description": "Optional prefilled amount in rupees"
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "dataurl",
+                "png",
+                "svg"
+              ],
+              "default": "dataurl"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "QR code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrCode"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/svg+xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/users/parse-qr": {
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Resolve a scanned QR string to a payee",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "uri"
+                ],
+                "properties": {
+                  "uri": {
+                    "type": "string",
+                    "example": "upi://pay?pa=priya456%40phonepe&pn=Priya+Singh&cu=INR",
+                    "description": "A upi:// deep link, or a bare UPI ID"
+                  }
+                }
+              },
+              "example": {
+                "uri": "upi://pay?pa=priya456%40phonepe&cu=INR"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Resolved payee",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParsedQr"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/payment-requests": {
+      "post": {
+        "tags": [
+          "Payment Requests"
+        ],
+        "summary": "Ask another user to pay you",
+        "description": "Creating a request moves no money. Only the payer accepting it does.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "payerIdentifier",
+                  "amount"
+                ],
+                "properties": {
+                  "payerIdentifier": {
+                    "type": "string",
+                    "example": "priya456@phonepe",
+                    "description": "Phone number or UPI ID"
+                  },
+                  "amount": {
+                    "oneOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "example": 250.5,
+                    "description": "Amount in rupees, max 2 decimal places. Rejected with 400 if more precise."
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 140,
+                    "example": "Lunch"
+                  },
+                  "expiresInHours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 720,
+                    "default": 72
+                  }
+                }
+              },
+              "example": {
+                "payerIdentifier": "priya456@phonepe",
+                "amount": 150,
+                "note": "Lunch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Request sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "request": {
+                      "$ref": "#/components/schemas/PaymentRequest"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Payment Requests"
+        ],
+        "summary": "List requests sent to me or by me",
+        "parameters": [
+          {
+            "name": "direction",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "incoming",
+                "outgoing"
+              ],
+              "default": "incoming"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "PENDING",
+                "ACCEPTED",
+                "DECLINED",
+                "CANCELLED",
+                "EXPIRED"
+              ]
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "description": "Page number (1-based)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 10
+            },
+            "description": "Page size. Hard-capped at MAX_PAGE_SIZE (100) server-side."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Requests page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "direction": {
+                      "type": "string"
+                    },
+                    "requests": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PaymentRequest"
+                      }
+                    },
+                    "pagination": {
+                      "$ref": "#/components/schemas/Pagination"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/payment-requests/{id}/accept": {
+      "post": {
+        "tags": [
+          "Payment Requests"
+        ],
+        "summary": "Pay a request (this is what moves the money)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional. Repeating a request with the same key replays the original response instead of moving money twice — send one per logical payment attempt."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "mpin"
+                ],
+                "properties": {
+                  "mpin": {
+                    "type": "string",
+                    "pattern": "^\\d{4,6}$",
+                    "example": "1234",
+                    "description": "4-6 digit MPIN"
+                  }
+                }
+              },
+              "example": {
+                "mpin": "1234"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request paid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "request": {
+                      "$ref": "#/components/schemas/PaymentRequest"
+                    },
+                    "transaction": {
+                      "$ref": "#/components/schemas/Transaction"
+                    },
+                    "newBalance": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/IncorrectMpin"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/payment-requests/{id}/decline": {
+      "post": {
+        "tags": [
+          "Payment Requests"
+        ],
+        "summary": "Decline a request addressed to me",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Declined",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "request": {
+                      "$ref": "#/components/schemas/PaymentRequest"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/payment-requests/{id}/cancel": {
+      "post": {
+        "tags": [
+          "Payment Requests"
+        ],
+        "summary": "Cancel a request I sent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "request": {
+                      "$ref": "#/components/schemas/PaymentRequest"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/split-bills": {
+      "post": {
+        "tags": [
+          "Split Bills"
+        ],
+        "summary": "Split a bill across up to 20 people",
+        "description": "Shares are computed in exact paise and always sum to the total — ₹100 across 3 people becomes 3334/3333/3333, never 3333×3. The creator paid the bill, so their own share starts settled.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "description",
+                  "amount",
+                  "participantIdentifiers"
+                ],
+                "properties": {
+                  "description": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 140,
+                    "example": "Dinner at Truffles"
+                  },
+                  "amount": {
+                    "oneOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "example": 250.5,
+                    "description": "Amount in rupees, max 2 decimal places. Rejected with 400 if more precise."
+                  },
+                  "participantIdentifiers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "example": [
+                      "priya456@phonepe",
+                      "rahul789@phonepe"
+                    ],
+                    "description": "Phone numbers or UPI IDs of the OTHER participants"
+                  },
+                  "includeSelf": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Whether the creator takes a share"
+                  }
+                }
+              },
+              "example": {
+                "description": "Dinner at Truffles",
+                "amount": 100,
+                "participantIdentifiers": [
+                  "priya456@phonepe",
+                  "rahul789@phonepe"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Split created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "bill": {
+                      "$ref": "#/components/schemas/SplitBill"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Split Bills"
+        ],
+        "summary": "List splits I'm part of",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "OPEN",
+                "SETTLED"
+              ]
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "description": "Page number (1-based)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 10
+            },
+            "description": "Page size. Hard-capped at MAX_PAGE_SIZE (100) server-side."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Splits page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "bills": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SplitBill"
+                      }
+                    },
+                    "pagination": {
+                      "$ref": "#/components/schemas/Pagination"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/split-bills/{id}": {
+      "get": {
+        "tags": [
+          "Split Bills"
+        ],
+        "summary": "Get one split bill",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Split bill",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SplitBill"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/split-bills/{id}/settle": {
+      "post": {
+        "tags": [
+          "Split Bills"
+        ],
+        "summary": "Pay my share to the bill's creator",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional. Repeating a request with the same key replays the original response instead of moving money twice — send one per logical payment attempt."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "mpin"
+                ],
+                "properties": {
+                  "mpin": {
+                    "type": "string",
+                    "pattern": "^\\d{4,6}$",
+                    "example": "1234",
+                    "description": "4-6 digit MPIN"
+                  }
+                }
+              },
+              "example": {
+                "mpin": "1234"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Share settled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "bill": {
+                      "$ref": "#/components/schemas/SplitBill"
+                    },
+                    "transaction": {
+                      "$ref": "#/components/schemas/Transaction"
+                    },
+                    "newBalance": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/IncorrectMpin"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/recurring": {
+      "post": {
+        "tags": [
+          "Recurring"
+        ],
+        "summary": "Create an autopay mandate",
+        "description": "The MPIN is verified once here — that verification IS the authorization for future runs, matching how real e-mandates work. It is never stored. The worker then executes without any credential, and you can pause or cancel at any time.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "payeeIdentifier",
+                  "amount",
+                  "frequency",
+                  "mpin"
+                ],
+                "properties": {
+                  "payeeIdentifier": {
+                    "type": "string",
+                    "example": "rahul789@phonepe"
+                  },
+                  "amount": {
+                    "oneOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "example": 250.5,
+                    "description": "Amount in rupees, max 2 decimal places. Rejected with 400 if more precise."
+                  },
+                  "frequency": {
+                    "type": "string",
+                    "enum": [
+                      "DAILY",
+                      "WEEKLY",
+                      "MONTHLY"
+                    ],
+                    "example": "MONTHLY"
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 140,
+                    "example": "Rent share"
+                  },
+                  "startAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Optional first run. Defaults to one interval from now, so nothing charges immediately."
+                  },
+                  "mpin": {
+                    "type": "string",
+                    "pattern": "^\\d{4,6}$",
+                    "example": "1234",
+                    "description": "4-6 digit MPIN"
+                  }
+                }
+              },
+              "example": {
+                "payeeIdentifier": "rahul789@phonepe",
+                "amount": 499,
+                "frequency": "MONTHLY",
+                "note": "Rent share",
+                "mpin": "1234"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Mandate created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "mandate": {
+                      "$ref": "#/components/schemas/Mandate"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Recurring"
+        ],
+        "summary": "List my mandates",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ACTIVE",
+                "PAUSED",
+                "CANCELLED",
+                "FAILED"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Mandates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "mandates": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Mandate"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/recurring/{id}/pause": {
+      "post": {
+        "tags": [
+          "Recurring"
+        ],
+        "summary": "Pause an active mandate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "mandate": {
+                      "$ref": "#/components/schemas/Mandate"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/recurring/{id}/resume": {
+      "post": {
+        "tags": [
+          "Recurring"
+        ],
+        "summary": "Resume a paused or failed mandate",
+        "description": "Never resumes into the past — if nextRunAt has already passed it's pushed to the next interval.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resumed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "mandate": {
+                      "$ref": "#/components/schemas/Mandate"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/recurring/{id}": {
+      "delete": {
+        "tags": [
+          "Recurring"
+        ],
+        "summary": "Cancel a mandate permanently",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "mandate": {
+                      "$ref": "#/components/schemas/Mandate"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/admin/circuits": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Circuit breaker states",
+        "description": "Shows whether a dependency (currently SMTP) is being called or short-circuited, and why.",
+        "responses": {
+          "200": {
+            "description": "Breaker states",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "circuits": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CircuitState"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/admin/queues": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Notification queue depth and dead-letter count",
+        "responses": {
+          "200": {
+            "description": "Queue stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueStats"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/admin/queues/dead-letters": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Inspect permanently-failed jobs",
+        "description": "What never got delivered after every retry, with the failure reason and attempt count.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dead-lettered jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeadLetters"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    }
+  }
+}
