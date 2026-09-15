@@ -1,4 +1,4 @@
-# PhonePe MERN Clone — Backend
+# PhonePe like UPI System — Backend
 
 A PhonePe-style payments backend built on Node/Express/MongoDB, with a **double-entry ledger**, **integer-paise money handling**, and the operational pieces a real payment service needs.
 
